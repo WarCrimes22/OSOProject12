@@ -1,28 +1,38 @@
-# Użyj oficjalnego obrazu Node.js
+# Dockerfile dla OWASP Juice Shop
 FROM node:18-alpine
 
-# Ustaw katalog roboczy
+# Metadata
+LABEL maintainer="adresmailowyfajny@com.com"
+LABEL description="OWASP Juice Shop - DevSecOps Pipeline"
+
+# Utworzenie użytkownika aplikacji (zasada najmniejszych uprawnień)
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S juiceshop -u 1001
+
+# Ustawienie katalogu roboczego
 WORKDIR /juice-shop
 
-# Skopiuj pliki package.json
+# Kopiowanie plików package
 COPY package*.json ./
 
-# Zainstaluj zależności
+# Instalacja zależności produkcyjnych
+RUN npm ci --only=production && npm cache clean --force
 
-# Skopiuj resztę aplikacji
-COPY . .
+# Kopiowanie kodu aplikacji
+COPY --chown=juiceshop:nodejs . .
 
-# Ustaw zmienną środowiskową
-ENV NODE_ENV=production
+# Ustawienie uprawnień
+RUN chown -R juiceshop:nodejs /juice-shop
 
-# Otwórz port 3000
+# Przełączenie na użytkownika aplikacji
+USER juiceshop
+
+# Ekspozycja portu
 EXPOSE 3000
 
-# Utwórz użytkownika bez uprawnień root
-RUN addgroup -g 1001 -S nodejs
-RUN adduser -S juicer -u 1001
-RUN chown -R juicer:nodejs /juice-shop
-USER juicer
+# Zdrowie kontenera
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost:3000/rest/admin/application-version || exit 1
 
-# Uruchom aplikację
+# Uruchomienie aplikacji
 CMD ["npm", "start"]
