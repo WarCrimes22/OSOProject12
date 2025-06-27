@@ -2,27 +2,34 @@ version: '3.8'
 
 services:
   juice-shop:
-    build: .
-    container_name: juice-shop
+    build: 
+      context: .
+      dockerfile: docker/Dockerfile
     ports:
       - "3000:3000"
     environment:
       - NODE_ENV=production
-    healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
+    restart: unless-stopped
+    networks:
+      - juice-network
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /juice-shop/logs
 
-  # Serwis do testów DAST
+  # OWASP ZAP dla DAST
   zap:
     image: owasp/zap2docker-stable
-    container_name: juice-shop-zap
     command: zap-baseline.py -t http://juice-shop:3000 -J zap-report.json
     depends_on:
       - juice-shop
+    networks:
+      - juice-network
     volumes:
-      - ./reports:/zap/wrk:rw
-    profiles:
-      - testing
+      - ./security:/zap/wrk
+
+networks:
+  juice-network:
+    driver: bridge
