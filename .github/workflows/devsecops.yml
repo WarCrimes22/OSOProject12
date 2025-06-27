@@ -1,0 +1,247 @@
+name: DevSecOps Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  # Etap 1: Budowanie i podstawowe testy
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run unit tests
+        run: npm test
+
+      - name: Build Docker image
+        run: |
+          docker build -t juice-shop:${{ github.sha }} .
+          docker tag juice-shop:${{ github.sha }} juice-shop:latest
+
+      - name: Test Docker container
+        run: |
+          docker run -d --name test-container -p 3000:3000 juice-shop:latest
+          sleep 30
+          curl -f http://localhost:3000 || exit 1
+          docker stop test-container
+          docker rm test-container
+
+  # Etap 2: SCA (Software Composition Analysis)
+  sca-scan:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run npm audit
+        run: |
+          npm audit --audit-level=high --production || true
+          npm audit --json --audit-level=high --production > npm-audit-report.json || true
+
+      - name: Setup Java for OWASP Dependency Check
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Run OWASP Dependency Check
+        run: |
+          wget https://github.com/jeremylong/DependencyCheck/releases/download/v8.4.0/dependency-check-8.4.0-release.zip
+          unzip dependency-check-8.4.0-release.zip
+          ./dependency-check/bin/dependency-check.sh \
+            --project "Juice Shop" \
+            --scan . \
+            --format JSON \
+            --format HTML \
+            --out ./reports \
+            --suppression ./suppress.xml || true
+
+      - name: Upload SCA Reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: sca-reports
+          path: |
+            npm-audit-report.json
+            reports/
+
+  # Etap 3: SAST (Static Application Security Testing)
+  sast-scan:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Semgrep
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: >-
+            p/security-audit
+            p/secrets
+            p/owasp-top-ten
+          generateSarif: "1"
+
+      - name: Upload Semgrep SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep.sarif
+        if: always()
+
+      - name: Setup Python for Bandit
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Install and run Bandit (for Python files if any)
+        run: |
+          pip install bandit
+          bandit -r . -f json -o bandit-report.json || true
+
+      - name: Upload SAST Reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: sast-reports
+          path: |
+            semgrep.sarif
+            bandit-report.json
+
+  # Etap 4: Secrets Scanning
+  secrets-scan:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run GitLeaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+      - name: Setup Go for TruffleHog
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+
+      - name: Install and run TruffleHog
+        run: |
+          go install github.com/trufflesecurity/trufflehog/v3@latest
+          trufflehog filesystem --directory=. --json > trufflehog-report.json || true
+
+      - name: Upload Secrets Reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: secrets-reports
+          path: |
+            trufflehog-report.json
+
+  # Etap 5: DAST (Dynamic Application Security Testing)
+  dast-scan:
+    runs-on: ubuntu-latest
+    needs: build
+    services:
+      docker:
+        image: docker:20.10.7-dind
+        options: --privileged
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build and run application
+        run: |
+          docker build -t juice-shop:test .
+          docker run -d --name juice-shop-test -p 3000:3000 juice-shop:test
+          sleep 30
+
+      - name: Wait for application to be ready
+        run: |
+          timeout 60 bash -c 'while ! curl -f http://localhost:3000; do sleep 2; done'
+
+      - name: Run OWASP ZAP Baseline Scan
+        run: |
+          docker pull owasp/zap2docker-stable
+          docker run -v $(pwd)/reports:/zap/wrk/:rw \
+            -t owasp/zap2docker-stable \
+            zap-baseline.py \
+            -t http://host.docker.internal:3000 \
+            -J zap-report.json \
+            -r zap-report.html || true
+
+      - name: Run Nikto scan
+        run: |
+          docker pull sullo/nikto
+          docker run --rm sullo/nikto \
+            -h http://host.docker.internal:3000 \
+            -Format json \
+            -output nikto-report.json || true
+
+      - name: Stop test container
+        run: |
+          docker stop juice-shop-test
+          docker rm juice-shop-test
+
+      - name: Upload DAST Reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: dast-reports
+          path: |
+            reports/
+
+  # Etap 6: Podsumowanie bezpieczeństwa
+  security-summary:
+    runs-on: ubuntu-latest
+    needs: [sca-scan, sast-scan, secrets-scan, dast-scan]
+    if: always()
+    steps:
+      - name: Download all reports
+        uses: actions/download-artifact@v4
+
+      - name: Create security summary
+        run: |
+          echo "# Security Scan Summary" > security-summary.md
+          echo "## SCA (Software Composition Analysis)" >> security-summary.md
+          echo "- npm audit results available in artifacts" >> security-summary.md
+          echo "- OWASP Dependency Check results available in artifacts" >> security-summary.md
+          echo "" >> security-summary.md
+          echo "## SAST (Static Application Security Testing)" >> security-summary.md
+          echo "- Semgrep results available in SARIF format" >> security-summary.md
+          echo "- Bandit results available in artifacts" >> security-summary.md
+          echo "" >> security-summary.md
+          echo "## Secrets Scanning" >> security-summary.md
+          echo "- GitLeaks scan completed" >> security-summary.md
+          echo "- TruffleHog results available in artifacts" >> security-summary.md
+          echo "" >> security-summary.md
+          echo "## DAST (Dynamic Application Security Testing)" >> security-summary.md
+          echo "- OWASP ZAP baseline scan completed" >> security-summary.md
+          echo "- Nikto scan completed" >> security-summary.md
+
+      - name: Upload Security Summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-summary
+          path: security-summary.md

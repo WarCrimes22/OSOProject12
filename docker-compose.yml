@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  juice-shop:
+    build: .
+    container_name: juice-shop
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Serwis do testów DAST
+  zap:
+    image: owasp/zap2docker-stable
+    container_name: juice-shop-zap
+    command: zap-baseline.py -t http://juice-shop:3000 -J zap-report.json
+    depends_on:
+      - juice-shop
+    volumes:
+      - ./reports:/zap/wrk:rw
+    profiles:
+      - testing

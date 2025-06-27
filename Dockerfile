@@ -1,41 +1,28 @@
-FROM node:22 AS installer
-COPY . /juice-shop
-WORKDIR /juice-shop
-RUN npm i -g typescript ts-node
-RUN npm install --omit=dev --unsafe-perm
-RUN npm dedupe --omit=dev
-RUN rm -rf frontend/node_modules
-RUN rm -rf frontend/.angular
-RUN rm -rf frontend/src/assets
-RUN mkdir logs
-RUN chown -R 65532 logs
-RUN chgrp -R 0 ftp/ frontend/dist/ logs/ data/ i18n/
-RUN chmod -R g=u ftp/ frontend/dist/ logs/ data/ i18n/
-RUN rm data/chatbot/botDefaultTrainingData.json || true
-RUN rm ftp/legal.md || true
-RUN rm i18n/*.json || true
+# Użyj oficjalnego obrazu Node.js
+FROM node:18-alpine
 
-ARG CYCLONEDX_NPM_VERSION=latest
-RUN npm install -g @cyclonedx/cyclonedx-npm@$CYCLONEDX_NPM_VERSION
-RUN npm run sbom
-
-FROM gcr.io/distroless/nodejs22-debian12
-ARG BUILD_DATE
-ARG VCS_REF
-LABEL maintainer="Bjoern Kimminich <bjoern.kimminich@owasp.org>" \
-    org.opencontainers.image.title="OWASP Juice Shop" \
-    org.opencontainers.image.description="Probably the most modern and sophisticated insecure web application" \
-    org.opencontainers.image.authors="Bjoern Kimminich <bjoern.kimminich@owasp.org>" \
-    org.opencontainers.image.vendor="Open Worldwide Application Security Project" \
-    org.opencontainers.image.documentation="https://help.owasp-juice.shop" \
-    org.opencontainers.image.licenses="MIT" \
-    org.opencontainers.image.version="18.0.0" \
-    org.opencontainers.image.url="https://owasp-juice.shop" \
-    org.opencontainers.image.source="https://github.com/juice-shop/juice-shop" \
-    org.opencontainers.image.revision=$VCS_REF \
-    org.opencontainers.image.created=$BUILD_DATE
+# Ustaw katalog roboczy
 WORKDIR /juice-shop
-COPY --from=installer --chown=65532:0 /juice-shop .
-USER 65532
+
+# Skopiuj pliki package.json
+COPY package*.json ./
+
+# Zainstaluj zależności
+
+# Skopiuj resztę aplikacji
+COPY . .
+
+# Ustaw zmienną środowiskową
+ENV NODE_ENV=production
+
+# Otwórz port 3000
 EXPOSE 3000
-CMD ["/juice-shop/build/app.js"]
+
+# Utwórz użytkownika bez uprawnień root
+RUN addgroup -g 1001 -S nodejs
+RUN adduser -S juicer -u 1001
+RUN chown -R juicer:nodejs /juice-shop
+USER juicer
+
+# Uruchom aplikację
+CMD ["npm", "start"]
